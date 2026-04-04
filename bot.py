@@ -542,8 +542,7 @@ def detect_promise(text: str) -> bool:
 
 def _close_last_promise(db, chat_id: int, user_id: int, current_message_id: int):
     """
-    Закрывает последнее открытое обещание сотрудника в чате,
-    если оно было до текущего сообщения (2.4).
+    Закрывает открытое обещание сотрудника если новое обещание заменяет старое (2.5).
     """
     with db.cursor() as cur:
         cur.execute(
@@ -563,6 +562,27 @@ def _close_last_promise(db, chat_id: int, user_id: int, current_message_id: int)
             """,
             (chat_id, user_id, current_message_id),
         )
+
+
+def _close_promise_by_reply(db, chat_id: int, user_id: int, reply_to_message_id: int) -> bool:
+    """
+    Закрывает обещание когда сотрудник отвечает (reply) именно на своё
+    сообщение-обещание. Возвращает True если обещание было найдено и закрыто.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE promises
+            SET is_done = TRUE,
+                done_at = NOW() AT TIME ZONE 'utc'
+            WHERE chat_id = %s
+              AND user_id = %s
+              AND message_id = %s
+              AND is_done = FALSE
+            """,
+            (chat_id, user_id, reply_to_message_id),
+        )
+        return cur.rowcount > 0
 
 
 # ── Закрытие SLA по реакции сотрудника ───────────────────────────────────────
@@ -729,19 +749,15 @@ async def any_message_handler(message: Message, db):
                 PENDING_DUE.pop(user_id, None)
                 return
 
-    # 1) Содержательное сообщение сотрудника → автозакрытие предыдущего обещания (2.4)
-    is_substantive = bool(
-        message.text or message.document or message.photo or
-        message.video or message.voice or message.audio or
-        message.forward_from or message.forward_from_chat or
-        message.caption or message.sticker
-    )
-
     is_new_promise = direction == "out" and detect_promise(text)
 
-    if direction == "out" and is_substantive and not is_new_promise:
-        _close_last_promise(db, chat_id, user_id, message.message_id)
-        db.commit()
+    # 1) Закрытие обещания через reply на своё сообщение-обещание
+    if direction == "out" and not is_new_promise and message.reply_to_message:
+        replied_msg_id = message.reply_to_message.message_id
+        closed = _close_promise_by_reply(db, chat_id, user_id, replied_msg_id)
+        if closed:
+            db.commit()
+            await message.reply("✅ Обещание выполнено и закрыто.")
 
     # 2) Детект нового обещания
     if is_new_promise:
