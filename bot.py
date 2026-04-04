@@ -829,6 +829,10 @@ async def any_message_handler(message: Message, db):
                 )
             db.commit()
 
+            await message.reply(
+                f"✅ Обещание зафиксировано. Срок: до {format_msk(due_at_utc)}."
+            )
+
 
 # =========================
 # 3) Middleware DB
