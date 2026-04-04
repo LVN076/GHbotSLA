@@ -205,7 +205,7 @@ def sla_policy_by_stage(stage: str):
         wait1 = timedelta(minutes=90)
         wait2 = timedelta(minutes=30)
         wait3 = timedelta(minutes=30)
-        wait4 = None
+        wait4 = timedelta(minutes=30)
         label = "⏱ SLA: клиент ждёт ответа > 90 минут."
 
     return {
@@ -974,6 +974,7 @@ async def escalation_chain_dynamic(bot: Bot, conn, chat_id: int, stage: str) -> 
     if foreman_in_chat:
         return [
             foreman_id,
+            USERS["site_manager"]["user_id"],
             USERS["construction_director"]["user_id"],
             USERS["owner"]["user_id"],
         ]
@@ -1311,6 +1312,38 @@ async def sla_watcher_v1(bot: Bot, conn):
                                     VALUES (%s, %s, %s, %s, %s, %s)
                                     """,
                                     (chat_id, stage or "", 3, target, last_in_at, now),
+                                )
+                            conn.commit()
+
+                # ping4
+                wait4 = policy.get("wait4")
+                if wait4 and ping3_at is not None and ping4_at is None and (now - ping3_at) >= wait4:
+                    if len(chain) >= 4:
+                        text = (
+                            f"🚨 Финальная эскалация\n\n"
+                            f"Чат: {chat_title}\n"
+                            f"Этап: {stage_ru}\n"
+                            f"Уровень: 4/{esc_total}\n"
+                            f"Время сообщения Заказчика: {format_msk(last_in_at)}\n"
+                            f"Текст: {last_in_text[:300]}\n"
+                            f"👉 Пожалуйста, подключитесь и дайте ответ в чате."
+                        )
+                        target = chain[3]
+                        ok = await send_with_member_check(target, text)
+                        if ok:
+                            with conn.cursor() as cur:
+                                cur.execute(
+                                    "UPDATE sla_state_v1 SET ping4_at=%s, ping4_user_id=%s WHERE chat_id=%s",
+                                    (now, target, chat_id),
+                                )
+                            conn.commit()
+                            with conn.cursor() as cur:
+                                cur.execute(
+                                    """
+                                    INSERT INTO sla_ping_events(chat_id, stage, level, target_user_id, last_in_at, ping_at)
+                                    VALUES (%s, %s, %s, %s, %s, %s)
+                                    """,
+                                    (chat_id, stage or "", 4, target, last_in_at, now),
                                 )
                             conn.commit()
 
