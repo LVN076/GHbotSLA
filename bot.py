@@ -225,7 +225,7 @@ def silence_policy_by_stage(stage: str) -> dict:
     """
     if stage == "prebuild":
         return {
-            "threshold": timedelta(days=2),
+            "threshold": timedelta(hours=72),
             "wait2": timedelta(hours=12),
             "wait3": None,
             "wait4": None,
@@ -1023,6 +1023,24 @@ def build_sla_message(chat_title: str, stage: str, level: int, level_total: int,
     )
 
 
+def _to_utc(dt):
+    """Привести datetime к aware UTC. None → None."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _dt_equal(a, b, tol_seconds: int = 1) -> bool:
+    """Сравнение datetime с допуском (защита от round-trip через TIMESTAMP без tz)."""
+    a = _to_utc(a)
+    b = _to_utc(b)
+    if a is None or b is None:
+        return a is b
+    return abs((a - b).total_seconds()) <= tol_seconds
+
+
 def _silence_state_get(conn, chat_id: int):
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute("SELECT * FROM silence_state_v1 WHERE chat_id=%s", (chat_id,))
@@ -1364,6 +1382,11 @@ async def silence_watcher_v1(bot: Bot, conn):
             now_utc = datetime.now(timezone.utc)
             print("[SILENCE] tick", now_utc.isoformat())
 
+            # Не дёргаем сотрудников вне рабочего дня (09:00–20:00 МСК)
+            if not in_work_hours_msk(now_utc):
+                await asyncio.sleep(600)
+                continue
+
             # Напоминание о паузе через 7 дней (3.3) — только уведомление, пауза НЕ снимается
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
@@ -1433,7 +1456,7 @@ async def silence_watcher_v1(bot: Bot, conn):
 
                 if (now_utc - last_out_at) < threshold:
                     state = _silence_state_get(conn, chat_id)
-                    if state and state.get("last_out_at") != last_out_at:
+                    if state and not _dt_equal(state.get("last_out_at"), last_out_at):
                         _silence_state_reset(conn, chat_id, last_out_at)
                     continue
 
@@ -1446,7 +1469,7 @@ async def silence_watcher_v1(bot: Bot, conn):
                     _silence_state_reset(conn, chat_id, last_out_at)
                     state = _silence_state_get(conn, chat_id)
 
-                if state.get("last_out_at") != last_out_at:
+                if not _dt_equal(state.get("last_out_at"), last_out_at):
                     _silence_state_reset(conn, chat_id, last_out_at)
                     state = _silence_state_get(conn, chat_id)
 
